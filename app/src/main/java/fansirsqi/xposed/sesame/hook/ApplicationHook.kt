@@ -358,7 +358,7 @@ class ApplicationHook {
         if (shouldEnableSimplePageManager()) {
             enableWindowMonitoring(classLoader)
             addHandler("com.alipay.mobile.nebulax.xriver.activity.XRiverActivity", Captcha1Handler())
-            addHandler("com.eg.android.AlipayGphone.AlipayLogin", Captcha2Handler())
+            addHandler("com.alipay.mobile.nebulax.integration.mpaas.activity.NebulaTransActivity\$Main", Captcha2Handler())
         }
     }
 

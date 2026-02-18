@@ -43,15 +43,15 @@ abstract class BaseCaptchaHandler {
         // 滑动参数配置
         private const val SLIDE_START_OFFSET = 25
         private const val SLIDE_END_MARGIN = 20
-        private const val SLIDE_DURATION_MIN = 500L
-        private const val SLIDE_DURATION_MAX = 800L //稍微增加最大时间
-        private const val POST_SLIDE_CHECK_DELAY_MS = 2000L
+        private const val SLIDE_DURATION_MIN = 300L  // 减少最小滑动时间
+        private const val SLIDE_DURATION_MAX = 600L  // 减少最大滑动时间
+        private const val POST_SLIDE_CHECK_DELAY_MS = 1000L  // 减少检查延迟
 
         // 旧版本 XPath
         private const val OLD_SLIDE_VERIFY_TEXT_XPATH = "//TextView[contains(@text,'向右滑动验证')]"
         
-        // 新版本 XPath (根据提供的截图)
-        private const val NEW_SLIDE_VERIFY_TEXT_XPATH = "//TextView[contains(@text,'请拖动滑块完成拼图')]"
+        // 新版本 XPath
+        private const val NEW_SLIDE_VERIFY_TEXT_XPATH = "//View[contains(@text,'请拖动滑块完成拼图')]"
         
         private val captchaProcessingMutex = Mutex()
     }
@@ -62,6 +62,9 @@ abstract class BaseCaptchaHandler {
 
     open suspend fun handleActivity(activity: Activity, root: SimpleViewImage): Boolean {
         return try {
+            // 立即记录开始处理时间
+            val startTime = System.currentTimeMillis()
+            Log.record(TAG, "开始处理验证码，Activity: ${activity.javaClass}")
 
             // 版本判断逻辑
             val isNewVersion = if (VersionHook.hasVersion()) {
@@ -72,13 +75,17 @@ abstract class BaseCaptchaHandler {
                 false
             }
 
-            if (isNewVersion) {
+            val result = if (isNewVersion) {
                 Log.record(TAG, "检测到新版本应用，使用图像识别模式处理验证码。")
                 handleNewVersionCaptcha(activity)
             } else {
                 Log.record(TAG, "检测到旧版本应用，使用传统模式处理验证码。")
                 handleLegacySlideCaptcha(activity)
             }
+            
+            val endTime = System.currentTimeMillis()
+            Log.record(TAG, "验证码处理完成，耗时: ${endTime - startTime}ms, 结果: $result")
+            result
         } catch (e: Exception) {
             Log.error(TAG, "处理验证码页面时发生异常: ${e.stackTraceToString()}")
             false
@@ -87,45 +94,65 @@ abstract class BaseCaptchaHandler {
 
     @SuppressLint("SuspiciousIndentation")
     private suspend fun handleNewVersionCaptcha(activity: Activity): Boolean {
-        if (!captchaProcessingMutex.tryLock()) return true
+        if (!captchaProcessingMutex.tryLock()) {
+            Log.record(TAG, "验证码正在处理中，跳过本次处理")
+            return true
+        }
         try {
+            val initStartTime = System.currentTimeMillis()
             if (sliderDetector == null) {
                 sliderDetector = SliderTFLite(activity.applicationContext)
+                Log.record(TAG, "初始化TFLite检测器耗时: ${System.currentTimeMillis() - initStartTime}ms")
             }
 
-            // 1. 查找新版提示文本
-            val verifyText = SimplePageManager.tryGetTopView(NEW_SLIDE_VERIFY_TEXT_XPATH) ?: run {
-                // 如果没找到新版文本，尝试找旧版文本作为回退
-                if (SimplePageManager.tryGetTopView(OLD_SLIDE_VERIFY_TEXT_XPATH) != null) {
+            // 1. 查找新版提示文本 - 减少等待时间
+            val searchStartTime = System.currentTimeMillis()
+            var verifyText = SimplePageManager.tryGetTopView(NEW_SLIDE_VERIFY_TEXT_XPATH)
+
+            // 如果没找到新版文本，尝试找旧版文本
+            if (verifyText == null) {
+                verifyText = SimplePageManager.tryGetTopView(OLD_SLIDE_VERIFY_TEXT_XPATH)
+                if (verifyText != null) {
                     Log.record(TAG, "未找到新版文本但发现了旧版文本，回退到旧逻辑。")
                     captchaProcessingMutex.unlock() // 解锁以便调用旧逻辑
                     return handleLegacySlideCaptcha(activity)
                 }
-                Log.record(TAG, "未找文本文本!!!")
+            }
+
+            if (verifyText == null) {
+                Log.record(TAG, "未找到验证码文本!!!")
                 return false
             }
 
-            Log.record(TAG, "发现新版滑动验证文本: ${verifyText.getText()}")
-            delay(800L) // 等待图片加载完全
+            Log.record(TAG, "发现滑动验证文本: ${verifyText.getText()}, 查找耗时: ${System.currentTimeMillis() - searchStartTime}ms")
+
+            // 减少等待图片加载的时间
+            delay(300L) // 从800ms减少到300ms
 
             // 2. 查找关键视图：滑块(Slider) 和 背景图(Background)
-            // 这里需要根据实际布局层级调整。通常背景图是滑块的兄弟节点或父容器的子节点
-            val sliderView = ViewHierarchyAnalyzer.findActualSliderView(verifyText) ?: return false
+            val findViewStartTime = System.currentTimeMillis()
+            val sliderView = ViewHierarchyAnalyzer.findActualSliderView(verifyText) ?: run {
+                Log.record(TAG, "无法找到滑块视图，查找耗时: ${System.currentTimeMillis() - findViewStartTime}ms")
+                return false
+            }
+
             val backgroundView = findCaptchaImageView(sliderView) ?: run {
                 Log.record(TAG, "无法找到验证码背景图片视图")
                 return false
             }
+            Log.record(TAG, "视图查找耗时: ${System.currentTimeMillis() - findViewStartTime}ms")
 
             // 3. 截图并识别
+            val recognizeStartTime = System.currentTimeMillis()
             val (gapX, conf) = recognizeCaptchaGapNative(backgroundView) ?: run {
                 Log.record(TAG, "图像识别失败")
                 return false
             }
-            
+            Log.record(TAG, "图像识别耗时: ${System.currentTimeMillis() - recognizeStartTime}ms, 识别结果: x1=$gapX, conf=$conf")
+
             // 4. 计算坐标并滑动
-            // gapX 是图片内部的缺口左边缘 X 坐标
             val slideDistance = calculateDistance(gapX, backgroundView.width, backgroundView, sliderView)
-            
+
             return performSlide(activity, sliderView, slideDistance)
 
         } catch (e: Exception) {
@@ -203,18 +230,34 @@ abstract class BaseCaptchaHandler {
     @SuppressLint("SuspiciousIndentation")
     private suspend fun handleLegacySlideCaptcha(activity: Activity): Boolean {
         if (!captchaProcessingMutex.tryLock()) {
+            Log.record(TAG, "验证码正在处理中，跳过本次处理")
             return true
         }
         try {
+            val searchStartTime = System.currentTimeMillis()
             val slideTextInDialog = SimplePageManager.tryGetTopView(OLD_SLIDE_VERIFY_TEXT_XPATH) ?: run {
+                Log.record(TAG, "未找到旧版滑动验证文本，搜索耗时: ${System.currentTimeMillis() - searchStartTime}ms")
                 return false
             }
-            Log.record(TAG, "发现旧版滑动验证文本: ${slideTextInDialog.getText()}")
-            delay(500L)
+            Log.record(TAG, "发现旧版滑动验证文本: ${slideTextInDialog.getText()}, 搜索耗时: ${System.currentTimeMillis() - searchStartTime}ms")
+            
+            // 减少等待时间
+            delay(200L) // 从500ms减少到200ms
             
             // 使用旧版盲猜逻辑
-            val sliderView = ViewHierarchyAnalyzer.findActualSliderView(slideTextInDialog) ?: return false
-            val (startX, startY, endX, endY) = calculateLegacySlideCoordinates(activity, sliderView) ?: return false
+            val findViewStartTime = System.currentTimeMillis()
+            val sliderView = ViewHierarchyAnalyzer.findActualSliderView(slideTextInDialog) ?: run {
+                Log.record(TAG, "无法找到滑块视图，查找耗时: ${System.currentTimeMillis() - findViewStartTime}ms")
+                return false
+            }
+            Log.record(TAG, "滑块视图查找耗时: ${System.currentTimeMillis() - findViewStartTime}ms")
+            
+            val coordStartTime = System.currentTimeMillis()
+            val (startX, startY, endX, endY) = calculateLegacySlideCoordinates(activity, sliderView) ?: run {
+                Log.record(TAG, "坐标计算失败，计算耗时: ${System.currentTimeMillis() - coordStartTime}ms")
+                return false
+            }
+            Log.record(TAG, "坐标计算耗时: ${System.currentTimeMillis() - coordStartTime}ms")
             
             return executeSlide(sliderView, startX, startY, endX, endY)
         } catch (e: Exception) {
@@ -313,6 +356,7 @@ abstract class BaseCaptchaHandler {
         
         Log.record(TAG, "执行滑动: ($startX, $startY) -> ($endX, $endY), 时长: $slideDuration")
 
+        val swipeStartTime = System.currentTimeMillis()
         ApplicationHook.sendBroadcastShell(
             getSlidePathKey(),
             "input swipe ${startX.toInt()} ${startY.toInt()} ${endX.toInt()} ${endY.toInt()} $slideDuration"
@@ -326,9 +370,13 @@ abstract class BaseCaptchaHandler {
             endY = endY,
             duration = slideDuration
         )
+        Log.record(TAG, "滑动执行耗时: ${System.currentTimeMillis() - swipeStartTime}ms")
 
         delay(POST_SLIDE_CHECK_DELAY_MS)
-        return checkCaptchaTextGone()
+        val checkStartTime = System.currentTimeMillis()
+        val result = checkCaptchaTextGone()
+        Log.record(TAG, "结果检查耗时: ${System.currentTimeMillis() - checkStartTime}ms, 最终结果: $result")
+        return result
     }
 
     private fun checkCaptchaTextGone(): Boolean {

@@ -1,9 +1,8 @@
 package fansirsqi.xposed.sesame.hook.simple
 
 import android.content.Context
-import android.graphics.*
-import android.util.Log
-import fansirsqi.xposed.sesame.ml.Slider
+import android.graphics.* import fansirsqi.xposed.sesame.ml.Slider
+import fansirsqi.xposed.sesame.util.Log
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.support.model.Model
@@ -28,7 +27,7 @@ class SliderTFLite(val context: Context) {
 
     private var sliderModel: Slider? = null
 
-    init {
+    fun init() {
         initModel()
     }
 
@@ -37,6 +36,7 @@ class SliderTFLite(val context: Context) {
             // 配置 GPU 或 CPU 线程
             val optionsBuilder = Model.Options.Builder()
             if (CompatibilityList().isDelegateSupportedOnThisDevice) {
+                Log.record(TAG, "GPU支持加速,启用GPU加速")
                 optionsBuilder.setDevice(Model.Device.GPU)
             } else {
                 optionsBuilder.setNumThreads(4)
@@ -44,8 +44,9 @@ class SliderTFLite(val context: Context) {
 
             // 使用生成的 Slider 类实例化
             sliderModel = Slider.newInstance(context, optionsBuilder.build())
+            Log.record(TAG, "模型初始化成功")
         } catch (e: IOException) {
-            Log.e(TAG, "模型初始化失败", e)
+            Log.record(TAG, "模型初始化失败")
         }
     }
 
